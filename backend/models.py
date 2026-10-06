@@ -50,13 +50,14 @@ HARD_CONSTRAINT_TYPES = (
 SOFT_CONSTRAINT_TYPES = (
     "due_date",                 # penalise late completion (weighted tardiness)
     "preferred_window",         # penalise starts outside [a, b]
+    "preferred_start",          # penalise deviation from one preferred start
     "min_gap",                  # penalise insufficient gap between two tasks
     "resource_balance",         # penalise uneven resource load
     "setup_time",               # penalise missing setup between consecutive jobs
     "max_makespan",             # penalise exceeding a target makespan
 )
 
-SOLVER_NAMES = ("lp", "ip", "genetic", "simulated_annealing", "greedy")
+SOLVER_NAMES = ("lp", "ip", "genetic", "simulated_annealing", "greedy", "stable")
 
 SOLUTION_STATUS = ("optimal", "feasible", "infeasible", "timeout", "error")
 
@@ -196,6 +197,137 @@ class SoftConstraint:
 
 
 # --------------------------------------------------------------------------- #
+# Rescheduling (re-solve "from now on")
+# --------------------------------------------------------------------------- #
+
+# Lifecycle states a task can be in when a reschedule is requested.
+#   completed   -- finished before the freeze point; kept exactly where it is
+#   in_progress -- started, still running; pinned at its actual start and
+#                  continued to the freeze point, then re-planned as a tail
+#   interrupted-- started but stopped early (e.g. breakdown); its remaining
+#                  work becomes a normal not-started task
+#   pending     -- not started yet; the rescheduler may move it
+TASK_PROGRESS_STATES = ("completed", "in_progress", "interrupted", "pending")
+
+
+@dataclass
+class TaskProgress:
+    """Field report: the actual state of one task at the reschedule instant.
+
+    ``actual_start`` / ``actual_end`` are the realised times; ``processed`` is
+    the amount of work (in time slots) already consumed, so the remaining
+    duration can differ from the original plan (a task may run slower than
+    expected).
+    """
+    task: str
+    state: str
+    actual_start: Optional[int] = None
+    actual_end: Optional[int] = None
+    processed: int = 0
+    remaining: Optional[int] = None      # None -> duration - processed
+    note: str = ""
+
+    def __post_init__(self) -> None:
+        if self.state not in TASK_PROGRESS_STATES:
+            raise ValueError(f"unknown task progress state: {self.state}")
+        if self.processed < 0:
+            raise ValueError(f"task {self.task}: negative processed time")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "TaskProgress":
+        return cls(**d)
+
+
+@dataclass
+class Breakdown:
+    """A resource unavailable window ``[start, end)`` reported at reschedule
+    time (a breakdown, maintenance, unplanned absence ...)."""
+    resource: str
+    start: int
+    end: int
+
+    def __post_init__(self) -> None:
+        if self.end <= self.start:
+            raise ValueError(
+                f"breakdown on {self.resource}: end ({self.end}) must be "
+                f"after start ({self.start})")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "Breakdown":
+        return cls(**d)
+
+
+@dataclass
+class RushTask:
+    """An urgent job inserted at reschedule time.  Becomes a regular Task on
+    the (version-bumped) problem so the new plan stays reproducible."""
+    id: str
+    duration: int
+    name: str = ""
+    resource_requirements: Dict[str, float] = field(default_factory=dict)
+    dependencies: List[str] = field(default_factory=list)
+    release_time: Optional[int] = None       # None -> freeze point
+    due_date: Optional[int] = None
+    weight: float = 1.0
+    priority: float = 1.0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "RushTask":
+        return cls(**d)
+
+
+@dataclass
+class RescheduleRequest:
+    """Everything the floor knows at the freeze point ``now``.
+
+    * ``baseline_solution_id`` -- the plan currently being executed.
+    * ``now`` -- freeze point: completed/in-progress history before this slot
+      is frozen; only work at/after it is re-optimised.
+    * ``progress`` -- per-task overrides; tasks not listed default to
+      ``completed`` (end <= now), ``in_progress`` (straddles now) or
+      ``pending`` (starts >= now) according to the baseline.
+    * ``breakdowns`` -- extra resource-unavailable windows.
+    * ``rush_tasks`` -- newly inserted urgent orders.
+    * ``solver`` -- method used to re-plan the free tail: ``stable`` (minimum
+      perturbation) or any of the ordinary solvers.
+    * ``stability_weight`` -- penalty per time slot of deviation from the
+      previous plan for an already-scheduled task.  Larger -> fewer changes.
+    """
+    baseline_solution_id: str
+    now: int
+    progress: List[TaskProgress] = field(default_factory=list)
+    breakdowns: List[Breakdown] = field(default_factory=list)
+    rush_tasks: List[RushTask] = field(default_factory=list)
+    solver: str = "stable"
+    stability_weight: float = 10.0
+    params: Dict[str, Any] = field(default_factory=dict)
+    persist: bool = True
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "RescheduleRequest":
+        d = dict(d)
+        d["progress"] = [TaskProgress.from_dict(x)
+                         for x in d.get("progress", [])]
+        d["breakdowns"] = [Breakdown.from_dict(x)
+                           for x in d.get("breakdowns", [])]
+        d["rush_tasks"] = [RushTask.from_dict(x)
+                           for x in d.get("rush_tasks", [])]
+        return cls(**d)
+
+
+# --------------------------------------------------------------------------- #
 # Objective
 # --------------------------------------------------------------------------- #
 
@@ -301,6 +433,9 @@ class Assignment:
     start: int
     end: int
     resources: List[str] = field(default_factory=list)
+    # Set for rescheduled in-progress/interrupted tasks whose remaining
+    # duration differs from the task definition; None means use Task.duration.
+    duration_override: Optional[int] = None
 
     @property
     def duration(self) -> int:
@@ -330,6 +465,10 @@ class Solution:
     lower_bound: Optional[float] = None
     created_at: str = field(default_factory=now_iso)
     version: int = 1
+    # Rescheduling lineage (None for ordinary solutions):
+    baseline_solution_id: Optional[str] = None
+    rescheduled_at: Optional[int] = None
+    change_summary: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)

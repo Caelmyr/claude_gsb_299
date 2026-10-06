@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>执行重排 — 排程求解系统</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">排程求解系统</div>
+    <div class="brand-sub">运筹优化与排程求解</div>
+    <nav id="nav"></nav>
+    <div class="section-label">问题实例</div>
+    <select id="problem-picker"></select>
+  </aside>
+  <main class="main">
+    <div class="page-head">
+      <h1>执行重排（从当前时点往后）</h1>
+      <span class="sub">已完成的不动、在制的按当前进度处理，只重排未开始的任务，并尽量少改动原计划</span>
+    </div>
+
+    <div class="card">
+      <div class="flex" style="flex-wrap:wrap;gap:14px">
+        <div style="min-width:260px">
+          <label>基准排程（正在执行的方案）</label>
+          <select id="baseline-picker"></select>
+        </div>
+        <div style="min-width:130px">
+          <label>当前时点 now</label>
+          <input type="number" id="now" min="0" value="0">
+        </div>
+        <div style="align-self:flex-end">
+          <button class="btn" id="derive-btn" onclick="derive()">按时间点生成现场状态</button>
+        </div>
+        <div style="min-width:200px">
+          <label>重排方法</label>
+          <select id="solver">
+            <option value="stable" selected>稳定重排（最小改动，推荐）</option>
+            <option value="greedy">贪心 + 稳定性罚分</option>
+            <option value="simulated_annealing">模拟退火 + 稳定性罚分</option>
+            <option value="genetic">遗传算法 + 稳定性罚分</option>
+          </select>
+        </div>
+        <div style="min-width:150px">
+          <label>稳定性权重（越大改动越少）</label>
+          <input type="number" id="stability-weight" value="10" step="any" min="0">
+        </div>
+        <div style="align-self:flex-end">
+          <button class="btn primary" id="run-btn" onclick="runReschedule()">▶ 从现在起重排</button>
+        </div>
+      </div>
+      <p class="small muted" style="margin:10px 0 0">
+        ① 选择基准方案并设定当前时点 → ② 点击「生成现场状态」自动判定完成/在制/未开始，
+        再按现场实际修改 → ③ 登记故障与急单 → ④ 执行重排。
+      </p>
+    </div>
+
+    <div class="grid cols-2">
+      <div class="card">
+        <div class="flex">
+          <h2 style="margin:0">任务现场状态</h2>
+          <div class="spacer"></div>
+          <span class="small muted">在制任务可填写「已做工时 / 剩余工时」</span>
+        </div>
+        <div style="overflow-x:auto">
+        <table>
+          <thead><tr><th>任务</th><th>状态</th><th class="num">原开始</th><th class="num">原结束</th>
+            <th class="num">已做</th><th class="num">剩余</th></tr></thead>
+          <tbody id="progress-rows"></tbody>
+        </table>
+        </div>
+      </div>
+
+      <div>
+        <div class="card">
+          <h2>资源故障 / 停机窗口</h2>
+          <div id="breakdown-rows" class="small"></div>
+          <div class="flex" style="gap:8px;flex-wrap:wrap;margin-top:8px">
+            <select id="bd-res" style="min-width:120px"></select>
+            <input type="number" id="bd-start" placeholder="开始" style="width:80px" min="0">
+            <input type="number" id="bd-end" placeholder="结束" style="width:80px" min="0">
+            <button class="btn sm" onclick="addBreakdown()">＋ 添加故障</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>插入急单（新任务）</h2>
+          <div id="rush-rows" class="small"></div>
+          <div class="flex" style="gap:8px;flex-wrap:wrap;margin-top:8px">
+            <input id="rush-id" placeholder="任务号" style="width:90px">
+            <input type="number" id="rush-dur" placeholder="工期" style="width:80px" min="1">
+            <select id="rush-res" style="min-width:120px"></select>
+            <button class="btn sm" onclick="addRush()">＋ 添加急单</button>
+          </div>
+          <p class="small muted" style="margin:8px 0 0">急单会追加到问题定义（生成新版本），保证新方案可复现。</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" id="result-card" style="display:none">
+      <div class="flex">
+        <h2 style="margin:0">重排结果与改动对比</h2>
+        <div class="spacer"></div>
+        <span id="result-meta"></span>
+      </div>
+
+      <div class="grid cols-5" style="margin-top:12px">
+        <div class="stat"><div class="label">已完成（冻结）</div><div class="value" id="k-done">—</div></div>
+        <div class="stat"><div class="label">进行中</div><div class="value" id="k-prog">—</div></div>
+        <div class="stat"><div class="label">中断</div><div class="value" id="k-int">—</div></div>
+        <div class="stat"><div class="label">移动任务数</div><div class="value" id="k-moved">—</div></div>
+        <div class="stat"><div class="label">总偏移量 / 最大偏移</div>
+          <div class="value" style="font-size:16px"><span id="k-shift">—</span> / <span id="k-max">—</span></div></div>
+      </div>
+      <div class="flex" style="margin-top:10px;gap:16px;flex-wrap:wrap" id="obj-meta"></div>
+
+      <div id="gantt-container" style="margin-top:12px"></div>
+      <div class="legend" id="legend"></div>
+
+      <h3 style="margin-top:16px">逐任务改动明细（虚线框＝原计划）</h3>
+      <div style="overflow-x:auto">
+      <table>
+        <thead><tr><th>任务</th><th>现场状态</th><th>改动</th>
+          <th class="num">原开始</th><th class="num">原结束</th>
+          <th class="num">新开始</th><th class="num">新结束</th>
+          <th class="num">偏移 Δ</th></tr></thead>
+        <tbody id="diff-rows"></tbody>
+      </table>
+      </div>
+      <div class="btn-row">
+        <a class="btn" id="gantt-link" target="_blank">在甘特图页打开新方案</a>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="js/common.js"></script>
+<script src="js/gantt.js"></script>
+<script src="js/reschedule.js"></script>
+</body>
+</html>

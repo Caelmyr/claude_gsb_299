@@ -126,5 +126,6 @@ def default_params(name: str) -> Dict[str, Any]:
             "time_limit": 30,
         },
         "greedy": {},
+        "stable": {"polish_passes": 2},
     }
     return defaults.get(name, {})

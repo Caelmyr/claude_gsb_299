@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 
 from flask import Flask, jsonify, request, send_from_directory
 
-from . import models, report, sensitivity, storage
+from . import models, report, reschedule as resched_mod, sensitivity, storage
 from .solvers import base as solver_base
 
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -140,6 +140,59 @@ def create_app() -> Flask:
     @app.route("/api/problems/<problem_id>/solutions", methods=["GET"])
     def solutions(problem_id: str):
         return jsonify({"solutions": storage.list_solutions(problem_id)})
+
+    # ------------------------------------------------------------------ #
+    # Rescheduling ("re-plan from now on")
+    # ------------------------------------------------------------------ #
+    @app.route("/api/problems/<problem_id>/reschedule/plan", methods=["POST"])
+    def reschedule_plan(problem_id: str):
+        """Return the default field report (task states at a freeze point),
+        so the UI can pre-fill the reschedule form."""
+        problem = storage.load_problem(problem_id)
+        if problem is None:
+            return jsonify({"error": "not found"}), 404
+        data = request.get_json(force=True) or {}
+        baseline = storage.load_solution(
+            problem_id, data.get("baseline_solution_id", ""))
+        if baseline is None:
+            return jsonify({"error": "baseline solution not found"}), 404
+        now = int(data.get("now", 0))
+        if now < 0:
+            return jsonify({"error": "now must be >= 0"}), 400
+        progress = resched_mod.derive_progress(problem, baseline, now)
+        return jsonify({
+            "now": now,
+            "baseline_solution_id": baseline.id,
+            "progress": [p.to_dict() for p in progress],
+        })
+
+    @app.route("/api/problems/<problem_id>/reschedule", methods=["POST"])
+    def reschedule_run(problem_id: str):
+        problem = storage.load_problem(problem_id)
+        if problem is None:
+            return jsonify({"error": "not found"}), 404
+        data = request.get_json(force=True) or {}
+        baseline_id = data.get("baseline_solution_id")
+        baseline = storage.load_solution(problem_id, baseline_id) if baseline_id else None
+        if baseline is None:
+            return jsonify({"error": "baseline solution not found"}), 404
+        try:
+            req = models.RescheduleRequest.from_dict(data)
+            req.baseline_solution_id = baseline_id
+            updated, solution = resched_mod.reschedule(problem, baseline, req)
+        except (TypeError, ValueError) as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        if data.get("persist", True):
+            # rush orders permanently extend the problem (new problem version)
+            if req.rush_tasks:
+                storage.save_problem(updated)
+            storage.save_solution(problem_id, solution)
+        return jsonify({
+            "solution": solution.to_dict(),
+            "problem_version": updated.version,
+            "n_new_tasks": len(req.rush_tasks),
+        }), 201
 
     @app.route("/api/problems/<problem_id>/solutions/<solution_id>", methods=["GET"])
     def solution(problem_id: str, solution_id: str):

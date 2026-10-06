@@ -119,6 +119,12 @@ def soft_penalty(problem: models.Problem, starts: Dict[str, int]) -> float:
                     contrib = lo - s
                 elif s > hi:
                     contrib = s - hi
+        elif c.type == "preferred_start":
+            # Deviation (either direction) from one preferred start time.
+            # This is the stability term injected by the rescheduler.
+            t = p.get("task")
+            if t and t in starts and p.get("start") is not None:
+                contrib = abs(starts[t] - int(p["start"]))
         elif c.type == "min_gap":
             a, b = p.get("a"), p.get("b")
             gap_req = p.get("gap", 0)

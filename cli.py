@@ -16,7 +16,7 @@ import json
 import sys
 from typing import Any, Dict, List
 
-from backend import models, report, seed, sensitivity, storage
+from backend import models, report, reschedule as resched_mod, seed, sensitivity, storage
 from backend.solvers import base as solver_base
 
 
@@ -83,6 +83,82 @@ def cmd_solutions(args) -> None:
               f"obj={s['objective_value']} mk={s['makespan']} t={s['solve_time']}s")
 
 
+def cmd_reschedule(args) -> None:
+    p = storage.load_problem(args.id)
+    if p is None:
+        print(f"no such problem: {args.id}")
+        sys.exit(1)
+    baseline = storage.load_solution(args.id, args.baseline)
+    if baseline is None:
+        print(f"no such baseline solution: {args.baseline}")
+        sys.exit(1)
+
+    progress = []
+    for item in args.progress:
+        # STATE:TASK[:processed[:remaining]] e.g.
+        #   completed:J1A   interrupted:J2B:3   in_progress:J3A:2:5
+        parts = item.split(":")
+        if len(parts) < 2:
+            print(f"bad --progress value: {item}")
+            sys.exit(2)
+        state, tid = parts[0], parts[1]
+        processed = int(parts[2]) if len(parts) > 2 and parts[2] != "" else 0
+        remaining = int(parts[3]) if len(parts) > 3 and parts[3] != "" else None
+        progress.append(models.TaskProgress(
+            task=tid, state=state, processed=processed, remaining=remaining))
+
+    breakdowns = [
+        models.Breakdown(resource=r, start=s, end=e)
+        for (r, s, e) in args.breakdown
+    ]
+
+    rush_tasks = []
+    for item in args.rush:
+        # ID:DURATION:RES[,RES...]   e.g. J9X:4:M1
+        parts = item.split(":")
+        if len(parts) < 2:
+            print(f"bad --rush value: {item}")
+            sys.exit(2)
+        rid, dur = parts[0], int(parts[1])
+        res = {x: 1 for x in (parts[2].split(",") if len(parts) > 2 and parts[2] else [])}
+        deps = parts[3].split(",") if len(parts) > 3 and parts[3] else []
+        rush_tasks.append(models.RushTask(
+            id=rid, duration=dur, resource_requirements=res, dependencies=deps))
+
+    req = models.RescheduleRequest(
+        baseline_solution_id=baseline.id, now=args.now, progress=progress,
+        breakdowns=breakdowns, rush_tasks=rush_tasks,
+        solver=args.solver, stability_weight=args.stability_weight,
+        params=_parse_params(args.params))
+    try:
+        updated, sol = resched_mod.reschedule(p, baseline, req)
+    except ValueError as exc:
+        print(f"reschedule failed: {exc}")
+        sys.exit(1)
+
+    if rush_tasks:
+        storage.save_problem(updated)
+        print(f"problem updated to v{updated.version} (+{len(rush_tasks)} rush task(s))")
+    storage.save_solution(args.id, sol)
+    cs = sol.change_summary or {}
+    print(f"solution {sol.id}: solver={sol.solver} status={sol.status} "
+          f"objective={sol.objective_value} makespan={sol.makespan}")
+    print(f"  frozen @t={args.now}: completed={cs.get('n_completed')} "
+          f"in_progress={cs.get('n_in_progress')} "
+          f"interrupted={cs.get('n_interrupted')} pending={cs.get('n_pending')}")
+    print(f"  changes: moved={cs.get('n_moved')} added={cs.get('n_new')} "
+          f"abs_shift={cs.get('abs_shift')} max_shift={cs.get('max_shift')} "
+          f"objective_delta={cs.get('objective_delta')}")
+    for row in cs.get("rows", []):
+        if row["change"] in ("unchanged",):
+            continue
+        print(f"  {row['task']:8s} {row['change']:12s} "
+              f"base={row['base_start']}->{row['base_end']} "
+              f"new={row['new_start']}->{row['new_end']} Δ={row['delta']}")
+    if args.json:
+        print(json.dumps(sol.to_dict(), ensure_ascii=False, indent=2))
+
+
 def cmd_sensitivity(args) -> None:
     p = storage.load_problem(args.id)
     if p is None:
@@ -137,6 +213,28 @@ def main() -> None:
     p_sol = sub.add_parser("solutions")
     p_sol.add_argument("id")
     p_sol.set_defaults(func=cmd_solutions)
+
+    p_rs = sub.add_parser("reschedule",
+                          help="re-plan from a freeze point, keeping history")
+    p_rs.add_argument("id")
+    p_rs.add_argument("baseline", help="baseline solution id")
+    p_rs.add_argument("--now", type=int, required=True, help="freeze point")
+    p_rs.add_argument("--progress", nargs="*", default=[],
+                      help="STATE:TASK[:processed[:remaining]] per override")
+    p_rs.add_argument("--breakdown", nargs="*", default=[],
+                      type=lambda s: tuple(int(x) if i else x
+                                           for i, x in enumerate(s.split(":"))),
+                      help="RESOURCE:START:END (repeatable)")
+    p_rs.add_argument("--rush", nargs="*", default=[],
+                      help="ID:DURATION[:RES1,RES2[:DEP1,DEP2]]")
+    p_rs.add_argument("--solver", default="stable",
+                      choices=["stable", "greedy", "genetic",
+                               "simulated_annealing", "lp", "ip"])
+    p_rs.add_argument("--stability-weight", type=float, default=10.0,
+                      dest="stability_weight")
+    p_rs.add_argument("--params", nargs="*", default=[])
+    p_rs.add_argument("--json", action="store_true")
+    p_rs.set_defaults(func=cmd_reschedule)
 
     p_sens = sub.add_parser("sensitivity")
     p_sens.add_argument("id")

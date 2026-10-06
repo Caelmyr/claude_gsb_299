@@ -10,7 +10,7 @@ const HARD_CONSTRAINT_TYPES = ['precedence', 'time_window', 'fixed_start',
   'resource_capacity', 'non_overlap', 'max_concurrent', 'resource_assignment'];
 const SOFT_CONSTRAINT_TYPES = ['due_date', 'preferred_window', 'min_gap',
   'resource_balance', 'setup_time', 'max_makespan'];
-const SOLVER_NAMES = ['lp', 'ip', 'genetic', 'simulated_annealing', 'greedy'];
+const SOLVER_NAMES = ['lp', 'ip', 'genetic', 'simulated_annealing', 'greedy', 'stable'];
 
 const SOLVER_LABELS = {
   lp: '线性规划（松弛）',
@@ -18,6 +18,7 @@ const SOLVER_LABELS = {
   genetic: '遗传算法',
   simulated_annealing: '模拟退火',
   greedy: '贪心（优先规则）',
+  stable: '稳定重排（最小改动）',
 };
 
 const OBJECTIVE_LABELS = {
@@ -61,6 +62,26 @@ const STATUS_LABELS = {
   timeout: '超时',
   error: '错误',
 };
+
+const PROGRESS_LABELS = {
+  completed: '已完成（冻结）',
+  in_progress: '进行中（继续）',
+  interrupted: '中断（剩余重排）',
+  pending: '未开始（可调整）',
+};
+
+const CHANGE_LABELS = {
+  unchanged: '保持不变',
+  moved: '时间移动',
+  continued: '进行中（尾段重排）',
+  rescheduled: '中断后续排',
+  added: '新增急单',
+  scheduled: '新排入',
+  unscheduled: '未能排入',
+};
+
+function progressLabel(s) { return PROGRESS_LABELS[s] || s; }
+function changeLabel(c) { return CHANGE_LABELS[c] || c; }
 
 function objectiveLabel(t) { return OBJECTIVE_LABELS[t] || t; }
 function resourceTypeLabel(t) { return RESOURCE_TYPE_LABELS[t] || t; }
@@ -129,6 +150,7 @@ const NAV = [
   ['constraints.html', '约束配置'],
   ['solvers.html', '求解器与参数'],
   ['gantt.html', '甘特图'],
+  ['reschedule.html', '执行重排（从现在起）'],
   ['results.html', '结果与目标值'],
   ['sensitivity.html', '敏感性分析'],
   ['compare.html', '方案对比'],
