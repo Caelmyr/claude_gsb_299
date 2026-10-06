@@ -129,6 +129,7 @@ const NAV = [
   ['constraints.html', '约束配置'],
   ['solvers.html', '求解器与参数'],
   ['gantt.html', '甘特图'],
+  ['reschedule.html', '滚动重排'],
   ['results.html', '结果与目标值'],
   ['sensitivity.html', '敏感性分析'],
   ['compare.html', '方案对比'],

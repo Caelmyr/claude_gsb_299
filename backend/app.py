@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 
 from flask import Flask, jsonify, request, send_from_directory
 
-from . import models, report, sensitivity, storage
+from . import models, report, reschedule as reschedule_mod, sensitivity, storage
 from .solvers import base as solver_base
 
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -151,6 +151,66 @@ def create_app() -> Flask:
     @app.route("/api/problems/<problem_id>/solutions/<solution_id>", methods=["DELETE"])
     def delete_solution(problem_id: str, solution_id: str):
         if storage.delete_solution(problem_id, solution_id):
+            return jsonify({"ok": True})
+        return jsonify({"error": "not found"}), 404
+
+    # ------------------------------------------------------------------ #
+    # Roll-forward rescheduling
+    # ------------------------------------------------------------------ #
+    @app.route("/api/problems/<problem_id>/reschedule", methods=["POST"])
+    def reschedule_run(problem_id: str):
+        problem = storage.load_problem(problem_id)
+        if problem is None:
+            return jsonify({"error": "not found"}), 404
+        data = request.get_json(force=True) or {}
+
+        # baseline schedule: explicit id, otherwise the latest solution
+        baseline = None
+        baseline_id = data.get("baseline_solution_id")
+        if baseline_id:
+            baseline = storage.load_solution(problem_id, baseline_id)
+            if baseline is None:
+                return jsonify({"error": f"baseline solution not found: {baseline_id}"}), 404
+        else:
+            sols = storage.list_solutions(problem_id)
+            if sols:
+                baseline = storage.load_solution(problem_id, sols[-1]["id"])
+
+        try:
+            now = int(data.get("now", 0))
+            progress = [models.TaskProgress.from_dict(p)
+                        for p in data.get("progress", [])]
+            downtimes = [models.ResourceDowntime.from_dict(d)
+                         for d in data.get("downtimes", [])]
+            result = reschedule_mod.reschedule(
+                problem, now,
+                baseline=baseline,
+                progress=progress,
+                downtimes=downtimes,
+                new_tasks=data.get("new_tasks", []),
+                solver=data.get("solver", "stability"),
+                params=data.get("params") or {},
+                baseline_solution_id=baseline_id)
+        except (TypeError, ValueError) as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        storage.save_reschedule(problem_id, result)
+        return jsonify(result.to_dict()), 201
+
+    @app.route("/api/problems/<problem_id>/reschedules", methods=["GET"])
+    def reschedule_list(problem_id: str):
+        return jsonify({"reschedules": storage.list_reschedules(problem_id)})
+
+    @app.route("/api/problems/<problem_id>/reschedules/<reschedule_id>", methods=["GET"])
+    def reschedule_get(problem_id: str, reschedule_id: str):
+        result = storage.load_reschedule(problem_id, reschedule_id)
+        if result is None:
+            return jsonify({"error": "not found"}), 404
+        return jsonify(result.to_dict())
+
+    @app.route("/api/problems/<problem_id>/reschedules/<reschedule_id>", methods=["DELETE"])
+    def reschedule_delete(problem_id: str, reschedule_id: str):
+        if storage.delete_reschedule(problem_id, reschedule_id):
             return jsonify({"ok": True})
         return jsonify({"error": "not found"}), 404
 

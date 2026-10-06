@@ -254,3 +254,7 @@ td.mono { font-family: var(--mono); font-size: 12px; }
 .spacer { flex: 1; }
 .mt { margin-top: 12px; }
 .mb { margin-bottom: 12px; }
+
+/* roll-forward reschedule diff rows: unchanged tasks are visually secondary */
+.dim-row { opacity: .55; }
+.dim-row:hover { opacity: .9; }

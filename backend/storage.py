@@ -7,6 +7,7 @@ Layout (one directory per problem instance):
         problem.json            # current version (always valid, latest)
         versions/problem.<n>.json   # immutable historical snapshots
         solutions/<solution_id>.json
+        reschedules/<reschedule_id>.json
         configs/<config_id>.json
         reports/<report_id>.json
         sensitivity/<sensitivity_id>.json
@@ -70,6 +71,7 @@ def _subdirs(problem_id: str) -> List[str]:
         base,
         os.path.join(base, "versions"),
         os.path.join(base, "solutions"),
+        os.path.join(base, "reschedules"),
         os.path.join(base, "configs"),
         os.path.join(base, "reports"),
         os.path.join(base, "sensitivity"),
@@ -321,6 +323,63 @@ def delete_solution(problem_id: str, solution_id: str) -> bool:
     if not is_safe_id(solution_id):
         return False
     path = os.path.join(instance_dir(problem_id), "solutions", f"{solution_id}.json")
+    if not os.path.isfile(path):
+        return False
+    with problem_lock(problem_id):
+        os.remove(path)
+    return True
+
+
+# --------------------------------------------------------------------------- #
+# Rescheduling runs
+# --------------------------------------------------------------------------- #
+
+def save_reschedule(problem_id: str, result: models.RescheduleResult) -> models.RescheduleResult:
+    ensure_instance_dirs(problem_id)
+    with problem_lock(problem_id):
+        path = os.path.join(instance_dir(problem_id), "reschedules", f"{result.id}.json")
+        atomic_write_json(path, result.to_dict())
+    return result
+
+
+def list_reschedules(problem_id: str) -> List[Dict[str, Any]]:
+    rdir = os.path.join(instance_dir(problem_id), "reschedules")
+    if not os.path.isdir(rdir):
+        return []
+    out = []
+    for name in sorted(os.listdir(rdir)):
+        if not name.endswith(".json"):
+            continue
+        try:
+            d = _read_json(os.path.join(rdir, name))
+        except (OSError, json.JSONDecodeError):
+            continue
+        out.append({
+            "id": d.get("id"),
+            "baseline_solution_id": d.get("baseline_solution_id"),
+            "now": d.get("now"),
+            "solver": d.get("solver"),
+            "status": d.get("status"),
+            "summary": d.get("summary", {}),
+            "created_at": d.get("created_at"),
+            "n_changes": len(d.get("changes", [])),
+        })
+    return sorted(out, key=lambda r: r.get("created_at", ""))
+
+
+def load_reschedule(problem_id: str, reschedule_id: str) -> Optional[models.RescheduleResult]:
+    if not is_safe_id(reschedule_id):
+        return None
+    path = os.path.join(instance_dir(problem_id), "reschedules", f"{reschedule_id}.json")
+    if not os.path.isfile(path):
+        return None
+    return models.RescheduleResult.from_dict(_read_json(path))
+
+
+def delete_reschedule(problem_id: str, reschedule_id: str) -> bool:
+    if not is_safe_id(reschedule_id):
+        return False
+    path = os.path.join(instance_dir(problem_id), "reschedules", f"{reschedule_id}.json")
     if not os.path.isfile(path):
         return False
     with problem_lock(problem_id):

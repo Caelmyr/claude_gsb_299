@@ -210,19 +210,69 @@ def _window_deadline_ok(problem: models.Problem, task_id: str, t: int) -> bool:
 
 def decode(problem: models.Problem,
            priorities: Optional[Dict[str, float]] = None,
-           seed: Optional[int] = None) -> Dict[str, int]:
+           seed: Optional[int] = None,
+           fixed_starts: Optional[Dict[str, int]] = None,
+           anchor_starts: Optional[Dict[str, int]] = None) -> Dict[str, int]:
     """Decode priorities into a schedule (task id -> start time).
 
     Tasks that cannot be placed within the horizon are omitted; the caller can
-    detect infeasibility from the returned dict's length."""
+    detect infeasibility from the returned dict's length.
+
+    ``fixed_starts`` holds tasks whose start is imposed (the frozen prefix of a
+    roll-forward rescheduling run): they are seeded before decoding and never
+    moved.  ``anchor_starts`` holds *preferred* starts (the baseline plan):
+    whenever the anchored slot is still feasible the task is kept exactly there
+    instead of being pushed as early as possible -- this is the "minimum
+    disruption" placement rule.
+    """
+    fixed_starts = dict(fixed_starts or {})
     order = topological_order(problem, priorities)
-    starts: Dict[str, int] = {}
+    starts: Dict[str, int] = dict(fixed_starts)
     for task_id in order:
+        if task_id in starts:
+            continue
+        anchor = anchor_starts.get(task_id) if anchor_starts else None
+        if anchor is not None and anchor >= 0:
+            if (_window_ok_with_fixed(problem, task_id, anchor, starts)
+                    and _window_deadline_ok(problem, task_id, anchor)):
+                starts[task_id] = anchor
+                continue
+            # anchor no longer available (a breakdown / delayed predecessor):
+            # first search *forward* from the anchor -- pushing later disrupts
+            # downstream plans less than jumping earlier -- then fall back to
+            # the earliest feasible slot for a deadline that forces an advance.
+            t = anchor + 1
+            while t <= problem.horizon - problem.task_map()[task_id].duration:
+                if (_window_ok_with_fixed(problem, task_id, t, starts)
+                        and _window_deadline_ok(problem, task_id, t)):
+                    starts[task_id] = t
+                    break
+                t += 1
+            if task_id in starts:
+                continue
         s = _feasible_start(problem, task_id, starts)
         if s is None:
             continue
         starts[task_id] = s
     return starts
+
+
+def _window_ok_with_fixed(problem: models.Problem, task_id: str, t: int,
+                          starts: Dict[str, int]) -> bool:
+    """Capacity/window feasibility at exactly slot ``t`` (used by anchoring)."""
+    task = problem.task_map()[task_id]
+    if t < task.release_time or t + task.duration > problem.horizon:
+        return False
+    # precedence against already-fixed/placed tasks
+    for dep in task.dependencies:
+        if dep in starts and t < starts[dep] + problem.task_map()[dep].duration:
+            return False
+    for c in problem.hard_constraints:
+        if c.type == "precedence" and c.params.get("after") == task_id:
+            before = c.params.get("before")
+            if before in starts and t < starts[before] + problem.task_map()[before].duration:
+                return False
+    return _window_ok(problem, task, t, starts, problem.resource_map())
 
 
 def random_keys(problem: models.Problem, rng: random.Random) -> Dict[str, float]:

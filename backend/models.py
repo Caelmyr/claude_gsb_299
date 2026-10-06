@@ -60,6 +60,25 @@ SOLVER_NAMES = ("lp", "ip", "genetic", "simulated_annealing", "greedy")
 
 SOLUTION_STATUS = ("optimal", "feasible", "infeasible", "timeout", "error")
 
+# Execution states reported by the shop floor at rescheduling time.
+TASK_PROGRESS_STATUS = ("completed", "in_progress")
+
+# How a single task's placement changed between the baseline schedule and the
+# roll-forward result (used by ScheduleChange.change_type).
+RESCHEDULE_CHANGE_TYPES = (
+    "unchanged",        # still starts at the baseline time
+    "delayed",          # existing task, starts later than planned
+    "advanced",         # existing task, starts earlier than planned
+    "added",            # newly inserted rush order
+    "completed",        # already finished -- frozen, never touched
+    "in_progress",      # running now -- remainder fixed from `now`
+    "unscheduled",      # could not be re-placed inside the horizon
+)
+
+# Built-in deterministic rescheduling strategy: keep every not-started task at
+# its baseline start whenever that is still feasible ("minimum change").
+RESCHEDULE_SOLVERS = ("stability", "greedy", "genetic", "simulated_annealing")
+
 
 def now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
@@ -288,6 +307,112 @@ class Problem:
             SoftConstraint.from_dict(c) for c in d.get("soft_constraints", [])
         ]
         d["objective"] = Objective.from_dict(d.get("objective", {}))
+        return cls(**d)
+
+
+# --------------------------------------------------------------------------- #
+# Roll-forward rescheduling
+# --------------------------------------------------------------------------- #
+
+@dataclass
+class TaskProgress:
+    """Shop-floor execution state for one task at rescheduling time.
+
+    * ``completed``   -- the task is finished; its actual interval is frozen.
+      ``actual_end`` defaults to the baseline end.
+    * ``in_progress`` -- the task is running; ``remaining`` slots of work are
+      left and the remainder is scheduled continuously from ``now``.
+    """
+    task: str
+    status: str                                 # completed | in_progress
+    actual_start: Optional[int] = None
+    actual_end: Optional[int] = None            # completed only
+    remaining: Optional[int] = None             # in_progress only
+    resources: Optional[List[str]] = None       # override actually-used resources
+
+    def __post_init__(self) -> None:
+        if self.status not in TASK_PROGRESS_STATUS:
+            raise ValueError(f"unknown task progress status: {self.status}")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "TaskProgress":
+        return cls(**d)
+
+
+@dataclass
+class ResourceDowntime:
+    """A machine/resource breakdown (or other unavailability) starting at
+    rescheduling time.  ``[start, end)`` is half-open, in the problem's time
+    unit; ``end=None`` means down for the rest of the horizon."""
+    resource: str
+    start: int
+    end: Optional[int] = None
+    reason: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "ResourceDowntime":
+        return cls(**d)
+
+
+@dataclass
+class ScheduleChange:
+    """One row of the baseline-vs-new diff produced by a rescheduling run."""
+    task: str
+    change_type: str                            # see RESCHEDULE_CHANGE_TYPES
+    old_start: Optional[int] = None
+    old_end: Optional[int] = None
+    new_start: Optional[int] = None
+    new_end: Optional[int] = None
+    delta: int = 0                              # new_start - old_start (signed)
+    resources: List[str] = field(default_factory=list)
+    note: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "ScheduleChange":
+        return cls(**d)
+
+
+@dataclass
+class RescheduleResult:
+    """The full output of "re-schedule from now on".
+
+    The result carries the new complete schedule (frozen prefix + re-solved
+    suffix), the per-task diff against the baseline, and disruption summaries
+    so the UI can show exactly what moved and by how much.
+    """
+    id: str
+    problem_id: str
+    baseline_solution_id: Optional[str]
+    now: int
+    solver: str
+    status: str = "feasible"                    # feasible | infeasible
+    assignments: List[Assignment] = field(default_factory=list)
+    changes: List[ScheduleChange] = field(default_factory=list)
+    events: Dict[str, Any] = field(default_factory=dict)
+    summary: Dict[str, Any] = field(default_factory=dict)
+    metrics: Dict[str, Any] = field(default_factory=dict)
+    params: Dict[str, Any] = field(default_factory=dict)
+    solve_time: float = 0.0
+    message: str = ""
+    created_at: str = field(default_factory=now_iso)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "RescheduleResult":
+        d = dict(d)
+        d["assignments"] = [Assignment.from_dict(a) for a in d.get("assignments", [])]
+        d["changes"] = [ScheduleChange.from_dict(c) for c in d.get("changes", [])]
         return cls(**d)
 
 

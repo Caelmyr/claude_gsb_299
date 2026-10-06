@@ -1,0 +1,424 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>滚动重排 — 排程求解系统</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">排程求解系统</div>
+    <div class="brand-sub">运筹优化与排程求解</div>
+    <nav id="nav"></nav>
+    <div class="section-label">问题实例</div>
+    <select id="problem-picker"></select>
+  </aside>
+  <main class="main">
+    <div class="page-head">
+      <h1>滚动重排（从现在往后）</h1>
+      <span class="sub">已完成的不动、在制的按剩余进度续上，只重排未开始任务，并尽量少改动原计划</span>
+    </div>
+
+    <!-- 1. 现场状态 -->
+    <div class="card">
+      <h2>1. 现场状态与扰动</h2>
+      <div class="flex" style="flex-wrap:wrap;gap:12px">
+        <div><label>基线计划</label><select id="baseline-picker" style="min-width:260px"></select></div>
+        <div><label>当前时点 now</label><input id="now" type="number" min="0" value="0" style="width:110px"></div>
+        <div><label>重排策略</label>
+          <select id="solver">
+            <option value="stability">最少改动（锚定原计划，推荐）</option>
+            <option value="greedy">优先规则重排</option>
+            <option value="genetic">遗传算法（带稳定性惩罚）</option>
+            <option value="simulated_annealing">模拟退火（带稳定性惩罚）</option>
+          </select></div>
+      </div>
+
+      <h3 style="margin-top:18px">任务进度（已完成 / 在制）</h3>
+      <p class="small" style="color:#6b7280;margin:4px 0">
+        在“未上报”列点击状态即可上报；在制任务需填剩余工期。已完成/在制任务在重排中被冻结。
+      </p>
+      <table>
+        <thead><tr><th>任务</th><th>计划区间</th><th>未上报</th><th>已完成</th><th>在制</th>
+        <th>实际完工 / 剩余工期</th><th>资源（可留空）</th></tr></thead>
+        <tbody id="progress-rows"></tbody>
+      </table>
+
+      <div class="flex" style="margin-top:14px;flex-wrap:wrap;gap:18px">
+        <div style="flex:1;min-width:300px">
+          <h3>机器故障 / 停机</h3>
+          <div class="flex" style="gap:8px;flex-wrap:wrap">
+            <select id="dt-res"></select>
+            <input id="dt-start" type="number" placeholder="开始" style="width:90px">
+            <input id="dt-end" type="number" placeholder="结束（空=到 horizon）" style="width:180px">
+            <input id="dt-reason" placeholder="原因（可选）" style="width:140px">
+            <button class="btn" onclick="addDowntime()">添加停机</button>
+          </div>
+          <table style="margin-top:8px"><thead><tr><th>资源</th><th class="num">开始</th>
+          <th class="num">结束</th><th>原因</th><th></th></tr></thead>
+          <tbody id="downtime-rows"></tbody></table>
+        </div>
+        <div style="flex:1;min-width:300px">
+          <h3>插入急单（新任务）</h3>
+          <div class="flex" style="gap:8px;margin-top:8px">
+            <button class="btn" onclick="addRushTask()">添加急单</button>
+          </div>
+          <table style="margin-top:8px"><thead><tr><th>id</th><th>名称</th>
+          <th class="num">工期</th><th>资源需求</th><th>前序</th><th>优先级</th><th></th></tr></thead>
+          <tbody id="rush-rows"></tbody></table>
+        </div>
+      </div>
+
+      <div class="flex" style="margin-top:16px">
+        <button class="btn primary" onclick="runReschedule()">从 now 起滚动重排</button>
+        <span id="run-meta" class="small" style="align-self:center;color:#6b7280"></span>
+      </div>
+    </div>
+
+    <!-- 2. 改动总览 -->
+    <div class="card" id="summary-card" style="display:none">
+      <h2>2. 改了多少 — 总览</h2>
+      <div id="summary-badges" class="flex" style="flex-wrap:wrap;gap:10px"></div>
+      <div class="flex" style="flex-wrap:wrap;gap:18px;margin-top:12px">
+        <div id="summary-numbers" class="small" style="color:#374151"></div>
+        <div class="spacer"></div>
+        <span id="result-status"></span>
+      </div>
+    </div>
+
+    <!-- 3. 甘特对比 -->
+    <div class="card" id="gantt-card" style="display:none">
+      <div class="flex">
+        <h2 style="margin:0">3. 新旧对比甘特图</h2>
+        <div class="spacer"></div>
+        <select id="mode" style="width:130px">
+          <option value="resource">按资源</option><option value="task">按任务</option>
+        </select>
+      </div>
+      <p class="small" style="color:#6b7280">
+        <span style="color:#9ca3af">虚线灰框</span> = 原计划位置；
+        <span style="color:#2563eb">蓝色实条</span> = 在制；
+        <span style="color:#6b7280">灰条</span> = 已完成；
+        <span style="color:#e15759">红条</span> = 延后；
+        <span style="color:#59a14f">绿条</span> = 提前；
+        <span style="color:#f28e2b">橙条</span> = 急单。
+      </p>
+      <div id="gantt-container"></div>
+    </div>
+
+    <!-- 4. 差异明细表 -->
+    <div class="card" id="diff-card" style="display:none">
+      <h2>4. 任务级差异明细</h2>
+      <table>
+        <thead><tr><th>状态</th><th>任务</th><th class="num">原开始</th><th class="num">原结束</th>
+        <th class="num">新开始</th><th class="num">新结束</th><th class="num">位移 Δ</th>
+        <th>说明</th></tr></thead>
+        <tbody id="diff-rows"></tbody>
+      </table>
+    </div>
+
+    <!-- 历史重排 -->
+    <div class="card">
+      <h2>历史重排记录</h2>
+      <table>
+        <thead><tr><th>时间</th><th class="num">now</th><th>策略</th><th>状态</th>
+        <th class="num">改动</th><th class="num">总位移</th><th class="num">最大位移</th>
+        <th class="num">完工时间 Δ</th><th></th></tr></thead>
+        <tbody id="history-rows"></tbody>
+      </table>
+    </div>
+  </main>
+</div>
+<script src="js/common.js"></script>
+<script src="js/gantt.js"></script>
+<script>
+let problem = null;
+let baseline = null;
+let progressMap = {};      // task -> {status, extra}
+let downtimes = [];
+let rushTasks = [];
+let result = null;
+
+initSidebar('reschedule.html');
+
+const SOLVER_LABELS_RS = {
+  stability: '最少改动', greedy: '优先规则',
+  genetic: '遗传算法', simulated_annealing: '模拟退火',
+};
+
+async function init() {
+  const id = currentProblemId();
+  if (!id) { toast('请先在左侧选择问题实例', 'error'); return; }
+  problem = await api('/problems/' + id);
+  document.getElementById('now').value = 0;
+  buildResourceSelects();
+  await loadBaselines();
+  renderProgressRows();
+  await loadHistory();
+}
+
+async function loadBaselines() {
+  const { solutions } = await api(`/problems/${problem.id}/solutions`);
+  const sel = document.getElementById('baseline-picker');
+  sel.innerHTML = solutions.length
+    ? solutions.map(s => `<option value="${s.id}">${escapeHtml(SOLVER_LABELS[s.solver] || s.solver)} · 完工 ${s.makespan ?? '—'} · ${escapeHtml(s.created_at)}</option>`).join('')
+    : '<option value="">— 暂无基线方案（请先求解一次）—</option>';
+  if (solutions.length) sel.value = solutions[solutions.length - 1].id;
+  sel.onchange = loadBaselineSolution;
+  await loadBaselineSolution();
+}
+
+async function loadBaselineSolution() {
+  const id = document.getElementById('baseline-picker').value;
+  baseline = id ? await api(`/problems/${problem.id}/solutions/${id}`) : null;
+  renderProgressRows();
+}
+
+function baseInfo(taskId) {
+  const a = baseline?.assignments.find(x => x.task === taskId);
+  return a || null;
+}
+
+function buildResourceSelects() {
+  const opts = problem.resources.map(r =>
+    `<option value="${r.id}">${escapeHtml(r.id)} · ${escapeHtml(r.name || '')}</option>`).join('');
+  document.getElementById('dt-res').innerHTML = opts;
+}
+
+/* ---------------- progress reporting ---------------- */
+function renderProgressRows() {
+  const tb = document.getElementById('progress-rows');
+  tb.innerHTML = problem.tasks.map(t => {
+    const a = baseInfo(t.id);
+    const cur = progressMap[t.id];
+    const range = a ? `${a.start} → ${a.end}` : '基线未排';
+    const st = cur?.status || 'none';
+    const extraVal = st === 'completed'
+      ? (cur.actual_end ?? a?.end ?? '')
+      : st === 'in_progress' ? (cur.remaining ?? '') : '';
+    return `<tr>
+      <td class="mono">${escapeHtml(t.id)} <span class="small" style="color:#6b7280">${escapeHtml(t.name)}</span></td>
+      <td class="num small">${range}</td>
+      <td><label><input type="radio" name="st-${t.id}" ${st === 'none' ? 'checked' : ''}
+        onchange="setProgress('${t.id}','none')"> 未上报</label></td>
+      <td><label><input type="radio" name="st-${t.id}" ${st === 'completed' ? 'checked' : ''}
+        onchange="setProgress('${t.id}','completed')"> 已完成</label></td>
+      <td><label><input type="radio" name="st-${t.id}" ${st === 'in_progress' ? 'checked' : ''}
+        onchange="setProgress('${t.id}','in_progress')"> 在制</label></td>
+      <td><input id="ex-${t.id}" value="${extraVal}" style="width:150px"
+        ${st === 'none' ? 'disabled' : ''}
+        placeholder="${st === 'completed' ? '实际完工（可空）' : '剩余工期'}"
+        oninput="setProgressExtra('${t.id}', this.value)"></td>
+      <td class="small mono">${escapeHtml((a?.resources || Object.keys(t.resource_requirements)).join(', '))}</td>
+    </tr>`;
+  }).join('');
+}
+
+function setProgress(tid, status) {
+  if (status === 'none') delete progressMap[tid];
+  else progressMap[tid] = { status };
+  renderProgressRows();
+}
+function setProgressExtra(tid, v) {
+  if (!progressMap[tid]) return;
+  const n = v === '' ? null : Number(v);
+  if (progressMap[tid].status === 'completed') progressMap[tid].actual_end = n;
+  else progressMap[tid].remaining = n;
+}
+
+/* ---------------- downtimes ---------------- */
+function addDowntime() {
+  const resource = document.getElementById('dt-res').value;
+  const start = Number(document.getElementById('dt-start').value);
+  const endRaw = document.getElementById('dt-end').value;
+  const reason = document.getElementById('dt-reason').value;
+  if (!Number.isFinite(start)) { toast('请填写停机开始时间', 'error'); return; }
+  downtimes.push({ resource, start, end: endRaw === '' ? null : Number(endRaw), reason });
+  document.getElementById('dt-start').value = '';
+  document.getElementById('dt-end').value = '';
+  document.getElementById('dt-reason').value = '';
+  renderDowntimes();
+}
+function renderDowntimes() {
+  document.getElementById('downtime-rows').innerHTML = downtimes.map((d, i) =>
+    `<tr><td class="mono">${escapeHtml(d.resource)}</td><td class="num">${d.start}</td>
+     <td class="num">${d.end ?? '∞'}</td><td>${escapeHtml(d.reason || '')}</td>
+     <td><button class="btn sm" onclick="downtimes.splice(${i},1);renderDowntimes()">删除</button></td></tr>`
+  ).join('');
+}
+
+/* ---------------- rush orders ---------------- */
+function addRushTask() {
+  rushTasks.push({
+    id: 'RUSH' + (rushTasks.length + 1), name: '急单' + (rushTasks.length + 1),
+    duration: 2, resources: problem.resources[0]?.id ? { [problem.resources[0].id]: 1 } : {},
+    dependencies: [], priority: 5,
+  });
+  renderRush();
+}
+function renderRush() {
+  document.getElementById('rush-rows').innerHTML = rushTasks.map((t, i) =>
+    `<tr>
+      <td><input value="${escapeHtml(t.id)}" style="width:90px" oninput="rushTasks[${i}].id=this.value"></td>
+      <td><input value="${escapeHtml(t.name)}" style="width:100px" oninput="rushTasks[${i}].name=this.value"></td>
+      <td><input type="number" value="${t.duration}" style="width:60px" oninput="rushTasks[${i}].duration=Number(this.value)"></td>
+      <td><input value="${escapeHtml(Object.entries(t.resources).map(([k,v])=>k+':'+v).join(','))}"
+        style="width:120px" placeholder="M1:1,M2:1"
+        oninput="rushTasks[${i}].resources=parseReqs(this.value)"></td>
+      <td><input value="${escapeHtml((t.dependencies||[]).join(','))}" style="width:100px"
+        placeholder="逗号分隔" oninput="rushTasks[${i}].dependencies=this.value?this.value.split(','):[]"></td>
+      <td><input type="number" value="${t.priority}" style="width:60px" oninput="rushTasks[${i}].priority=Number(this.value)"></td>
+      <td><button class="btn sm" onclick="rushTasks.splice(${i},1);renderRush()">删除</button></td>
+    </tr>`).join('');
+}
+function parseReqs(s) {
+  const valid = new Set(problem.resources.map(r => r.id));
+  const out = {};
+  for (const part of s.split(',')) {
+    const [k, v] = part.split(':');
+    if (k && valid.has(k.trim())) out[k.trim()] = Number(v || 1);
+  }
+  return out;
+}
+
+/* ---------------- run ---------------- */
+async function runReschedule() {
+  const now = Number(document.getElementById('now').value);
+  const progress = Object.entries(progressMap).map(([task, v]) => {
+    const row = { task, status: v.status };
+    if (v.status === 'completed' && v.actual_end != null) row.actual_end = v.actual_end;
+    if (v.status === 'in_progress' && v.remaining != null) row.remaining = v.remaining;
+    return row;
+  });
+  const body = {
+    now,
+    baseline_solution_id: document.getElementById('baseline-picker').value || undefined,
+    progress, downtimes,
+    new_tasks: rushTasks.map(t => ({
+      id: t.id, name: t.name, duration: t.duration,
+      resource_requirements: t.resources,
+      dependencies: t.dependencies || [], priority: t.priority,
+    })),
+    solver: document.getElementById('solver').value,
+  };
+  document.getElementById('run-meta').textContent = '重排中…';
+  try {
+    result = await api(`/problems/${problem.id}/reschedule`, {
+      method: 'POST', body: JSON.stringify(body),
+    });
+    document.getElementById('run-meta').textContent =
+      `完成（${result.solve_time}s）${result.message ? '：' + result.message : ''}`;
+    renderResult();
+    await loadHistory();
+  } catch (e) {
+    document.getElementById('run-meta').textContent = '';
+    toast('重排失败：' + e.message, 'error');
+  }
+}
+
+/* ---------------- result rendering ---------------- */
+const CHANGE_LABELS = {
+  completed: '已完成', in_progress: '进行中', unchanged: '未改动',
+  delayed: '延后', advanced: '提前', added: '急单', unscheduled: '排不进',
+};
+const CHANGE_BADGE = {
+  completed: 'muted', in_progress: 'info', unchanged: 'ok',
+  delayed: 'bad', advanced: 'ok', added: 'warn', unscheduled: 'bad',
+};
+
+function renderResult() {
+  const s = result.summary;
+  document.getElementById('summary-card').style.display = '';
+  document.getElementById('gantt-card').style.display = '';
+  document.getElementById('diff-card').style.display = '';
+
+  const badges = [
+    ['已完成（冻结）', s.n_completed, 'muted'],
+    ['在制（冻结剩余）', s.n_in_progress, 'info'],
+    ['未改动', s.n_unchanged, 'ok'],
+    ['发生移动', s.n_changed, s.n_changed ? 'warn' : 'ok'],
+    ['急单新增', s.n_added, 'warn'],
+    ['排不进去', s.n_unscheduled, s.n_unscheduled ? 'bad' : 'muted'],
+  ];
+  document.getElementById('summary-badges').innerHTML = badges.map(([label, n, cls]) =>
+    `<span class="badge ${cls}" style="font-size:13px;padding:6px 12px">${label} <b>${n}</b></span>`).join('');
+
+  const mkDelta = s.makespan_delta;
+  document.getElementById('summary-numbers').innerHTML =
+    `总位移量 <b>${s.total_abs_shift}</b> · 最大单任务位移 <b>${s.max_abs_shift}</b> · ` +
+    `累计延后 <b>${s.total_delay}</b> · 改动占比 <b>${(s.fraction_changed * 100).toFixed(0)}%</b>`;
+  document.getElementById('result-status').innerHTML =
+    `<span class="badge ${result.status === 'feasible' ? 'ok' : 'bad'}">` +
+    `${result.status === 'feasible' ? '可行' : '不可行'}</span>
+     <span class="small">完工时间 ${s.makespan}（基线 ${s.baseline_makespan ?? '—'}，
+     Δ ${mkDelta ?? '—'}）</span>`;
+
+  // gantt: new assignments colored by state, baseline shown as ghosts
+  const states = Object.fromEntries(result.changes.map(c => [c.task, c.change_type]));
+  const ghosts = (baseline?.assignments || []).map(a => ({ ...a }));
+  const render = () => renderGantt(document.getElementById('gantt-container'), {
+    problem, assignments: result.assignments, mode: document.getElementById('mode').value,
+    title: `滚动重排 @ now=${result.now} — ${SOLVER_LABELS_RS[result.solver] || result.solver}`,
+    now: result.now, states, ghosts,
+  });
+  render();
+  document.getElementById('mode').onchange = render;
+
+  document.getElementById('diff-rows').innerHTML = result.changes.map(c => `
+    <tr class="${c.change_type === 'unchanged' ? 'dim-row' : ''}">
+      <td><span class="badge ${CHANGE_BADGE[c.change_type] || 'muted'}">${CHANGE_LABELS[c.change_type] || c.change_type}</span></td>
+      <td class="mono">${escapeHtml(c.task)}</td>
+      <td class="num">${c.old_start ?? '—'}</td><td class="num">${c.old_end ?? '—'}</td>
+      <td class="num"><b>${c.new_start ?? '—'}</b></td><td class="num">${c.new_end ?? '—'}</td>
+      <td class="num" style="color:${c.delta > 0 ? '#dc2626' : c.delta < 0 ? '#16a34a' : '#6b7280'}">
+        ${c.delta > 0 ? '+' + c.delta : c.delta}</td>
+      <td class="small">${escapeHtml(c.note)}</td>
+    </tr>`).join('');
+}
+
+/* ---------------- history ---------------- */
+async function loadHistory() {
+  const { reschedules } = await api(`/problems/${problem.id}/reschedules`);
+  document.getElementById('history-rows').innerHTML = reschedules.length
+    ? reschedules.slice().reverse().map(r => {
+        const s = r.summary || {};
+        return `<tr>
+          <td class="small">${escapeHtml(r.created_at)}</td>
+          <td class="num">${r.now}</td>
+          <td>${SOLVER_LABELS_RS[r.solver] || r.solver}</td>
+          <td><span class="badge ${r.status === 'feasible' ? 'ok' : 'bad'}">${r.status === 'feasible' ? '可行' : '不可行'}</span></td>
+          <td class="num">${s.n_changed ?? '—'}</td>
+          <td class="num">${s.total_abs_shift ?? '—'}</td>
+          <td class="num">${s.max_abs_shift ?? '—'}</td>
+          <td class="num">${s.makespan_delta ?? '—'}</td>
+          <td><button class="btn sm" onclick="viewResult('${r.id}')">查看</button>
+              <button class="btn sm" onclick="delResult('${r.id}')">删除</button></td>
+        </tr>`;
+      }).join('')
+    : '<tr><td colspan="9" class="empty">暂无重排记录</td></tr>';
+}
+
+async function viewResult(id) {
+  result = await api(`/problems/${problem.id}/reschedules/${id}`);
+  if (result.baseline_solution_id) {
+    try { baseline = await api(`/problems/${problem.id}/solutions/${result.baseline_solution_id}`); }
+    catch (_) { baseline = null; }
+  }
+  document.getElementById('now').value = result.now;
+  document.getElementById('solver').value = result.solver;
+  renderResult();
+  window.scrollTo({ top: document.getElementById('summary-card').offsetTop - 20, behavior: 'smooth' });
+}
+
+async function delResult(id) {
+  await api(`/problems/${problem.id}/reschedules/${id}`, { method: 'DELETE' });
+  await loadHistory();
+  toast('已删除');
+}
+
+init().catch(e => toast(e.message, 'error'));
+</script>
+</body>
+</html>
